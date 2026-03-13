@@ -1,0 +1,16 @@
+MetaTrader5
+pandas>=2.0
+numpy>=1.24
+TA-Lib
+vectorbt
+optuna
+APScheduler>=3.10
+SQLAlchemy>=2.0
+python-telegram-bot>=21.0
+python-dotenv
+pydantic>=2.0
+pydantic-settings
+loguru
+aiohttp
+rich
+tqdm
