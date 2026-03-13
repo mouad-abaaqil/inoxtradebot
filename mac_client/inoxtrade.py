@@ -4,6 +4,7 @@
 Usage:
     python inoxtrade.py setup      # configure VPS connection
     python inoxtrade.py connect    # live dashboard
+    python inoxtrade.py menu       # interactive menu
     python inoxtrade.py status     # one-line status
     python inoxtrade.py start      # start bot on VPS
     python inoxtrade.py stop       # stop bot on VPS
@@ -158,14 +159,36 @@ def _api_get(endpoint: str, params: dict = None) -> Any:
         sys.exit(1)
 
 
-def _api_post(endpoint: str) -> Any:
+def _api_post(endpoint: str, json_body: dict | None = None) -> Any:
     import requests
     try:
-        r = requests.post(f"{BASE_URL}{endpoint}", timeout=15)
+        r = requests.post(f"{BASE_URL}{endpoint}", json=json_body, timeout=15)
         return r.json()
     except requests.ConnectionError:
         _print_api_unreachable()
         sys.exit(1)
+
+
+def _api_post_safe(endpoint: str, json_body: dict | None = None) -> Any:
+    """Like _api_post but returns None on error."""
+    import requests
+    try:
+        r = requests.post(f"{BASE_URL}{endpoint}", json=json_body, timeout=15)
+        return r.json()
+    except Exception:
+        return None
+
+
+def _api_get_safe(endpoint: str, params: dict = None) -> Any:
+    """Like _api_get but returns None instead of exiting on error."""
+    import requests
+    try:
+        r = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=5)
+        if r.headers.get("content-type", "").startswith("application/json"):
+            return r.json()
+        return r.text
+    except Exception:
+        return None
 
 
 def _print_api_unreachable():
@@ -349,182 +372,801 @@ def cmd_logs():
 
 
 def cmd_connect():
-    """Live dashboard with 5s refresh."""
+    """Live terminal dashboard — exact visual spec."""
     from rich.align import Align
-    from rich.console import Console
-    from rich.layout import Layout
+    from rich.console import Console, Group
     from rich.live import Live
     from rich.panel import Panel
+    from rich.style import Style
     from rich.table import Table
     from rich.text import Text
 
-    HEADER = r"""
- ___ _   _  _____  _______ ____      _    ____  _____
-|_ _| \ | |/ _ \ \/ /_   _|  _ \    / \  |  _ \| ____|
- | ||  \| | | | \  /  | | | |_) |  / _ \ | | | |  _|
- | || |\  | |_| /  \  | | |  _ <  / ___ \| |_| | |___
-|___|_| \_|\___/_/\_\ |_| |_| \_\/_/   \_\____/|_____|
-"""
+    def _make_ascii_art() -> Text:
+        """Build the INOXTRADE ASCII banner with only X in red, rest bright white."""
+        raw_lines = [
+            " ___ _   _  _____  _______ ____      _    ____  _____",
+            "|_ _| \\ | |/ _ \\ \\/ /_   _|  _ \\    / \\  |  _ \\| ____|",
+            " | ||  \\| | | | \\  /  | | | |_) |  / _ \\ | | | |  _|",
+            " | || |\\  | |_| /  \\  | | |  _ <  / ___ \\| |_| | |___",
+            "|___|_| \\_|\\___/_/\\_\\ |_| |_| \\_\\/_/   \\_\\____/|_____|",
+        ]
+        t = Text()
+        for i, line in enumerate(raw_lines):
+            for j, ch in enumerate(line):
+                is_x = False
+                if i == 1 and 13 <= j <= 15:
+                    is_x = True
+                elif i == 2 and 13 <= j <= 17:
+                    is_x = True
+                elif i == 3 and 13 <= j <= 17:
+                    is_x = True
+                elif i == 4 and 13 <= j <= 17:
+                    is_x = True
+                t.append(ch, style="bold red" if is_x else "bold bright_white")
+            t.append("\n")
+        return t
 
-    def build_layout():
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header", size=11),
-            Layout(name="body", size=10),
-            Layout(name="trades"),
-        )
-        layout["body"].split_row(
-            Layout(name="account", ratio=1),
-            Layout(name="market", ratio=1),
-            Layout(name="last_trade", ratio=1),
-        )
-        return layout
+    def _disconnected_text() -> Text:
+        return Text("API DECONNECTEE", style="bold red")
 
-    def refresh(layout):
-        try:
-            status = _api_get("/status")
-            trades_data = _api_get("/trades")
-        except SystemExit:
-            return
+    def _build_dashboard(status: dict | None, trades_data: dict | None) -> Group:
+        api_ok = status is not None
+        now_utc = datetime.utcnow().strftime("%H:%M:%S UTC")
 
-        bot = status.get("bot", {})
-        acct = status.get("account", {})
-        mkt = status.get("market", {})
-        tr_summary = status.get("trades", {})
-        trades = trades_data.get("trades", [])
+        bot = status.get("bot", {}) if api_ok else {}
+        acct = status.get("account", {}) if api_ok else {}
+        mkt = status.get("market", {}) if api_ok else {}
+        tr_summary = status.get("trades", {}) if api_ok else {}
+        trades = trades_data.get("trades", []) if trades_data else []
 
-        now = datetime.utcnow().strftime("%Y-%m-%d  %H:%M:%S UTC")
+        parts = []
 
-        # -- Header --
-        hdr = Text()
-        hdr.append(HEADER.strip(), style="bold cyan")
-        hdr.append("\n")
-        hdr.append("Gold Algorithmic Trading System", style="bold white")
-        hdr.append("  |  ", style="dim")
-        hdr.append("XAUUSD", style="bold yellow")
-        hdr.append(" . IC Markets ECN . MT5", style="white")
-        hdr.append("  |  ", style="dim")
-        hdr.append(now, style="bold green")
-        hdr.append("  |  ", style="dim")
-        state_txt = "RUNNING" if bot.get("running") else "STOPPED"
-        state_sty = "bold green" if bot.get("running") else "bold red"
-        hdr.append(state_txt, style=state_sty)
-        layout["header"].update(Panel(Align.center(hdr), border_style="cyan"))
+        # ── 1. HEADER ──────────────────────────────────────────
+        header_txt = _make_ascii_art()
+        subtitle = Text()
+        subtitle.append("Gold Algorithmic Trading System — XAUUSD", style="dim")
+        subtitle.append(" . IC Markets ECN . MT5", style="dim")
+        subtitle.append("    ", style="dim")
+        subtitle.append(now_utc, style="bold white")
 
-        # -- Account --
-        g = Table.grid(padding=(0, 3))
-        g.add_column(justify="right", style="dim", min_width=16)
-        g.add_column(justify="left", min_width=20)
+        header_group = Text()
+        header_group.append_text(header_txt)
+        header_group.append_text(subtitle)
+        parts.append(Align.center(header_group))
 
-        bal = acct.get("balance")
-        if not acct.get("mt5_connected"):
-            g.add_row("Statut MT5", Text("MT5 DECONNECTE", style="bold red"))
-            g.add_row("Balance", Text("---", style="dim"))
+        # ── 2. METRIQUES (4 panels) ────────────────────────────
+        if api_ok:
+            bal = acct.get("balance")
+            bal_txt = Text(f"${bal:,.2f}" if bal else "---", style="bold white")
+            bal_sub = Text("[IC Markets]", style="dim")
+
+            pnl = acct.get("daily_pnl", 0) or 0
+            pnl_sign = "+" if pnl >= 0 else ""
+            pnl_style = "bold green" if pnl >= 0 else "bold red"
+            pnl_txt = Text(f"{pnl_sign}${pnl:,.2f}", style=pnl_style)
+            trade_count = tr_summary.get("total_today", 0)
+            pnl_sub = Text(f"[{trade_count} trades]", style="dim")
+
+            running = bot.get("running", False)
+            stat_txt = Text("ACTIF" if running else "STOPPED",
+                            style="bold cyan" if running else "bold red")
+            session = mkt.get("session", "---")
+            stat_sub = Text(f"[En session]" if session not in ("---", "Hors session", None) else "[Hors session]",
+                            style="dim")
+
+            kill_pct = acct.get("daily_pnl_pct", 0) or 0
+            kill_val = abs(kill_pct) if kill_pct < 0 else 0.0
+            is_danger = kill_val >= 3.0
+            kill_txt = Text(f"{kill_val:.1f}%",
+                            style="bold red on red" if is_danger else "bold bright_yellow")
+            kill_sub = Text("DANGER" if is_danger else "Safe",
+                            style="bold red on red" if is_danger else "bold bright_yellow")
         else:
-            g.add_row("Balance", Text(f"${bal:,.2f}", style="bold white"))
+            bal_txt = _disconnected_text()
+            bal_sub = Text("")
+            pnl_txt = _disconnected_text()
+            pnl_sub = Text("")
+            stat_txt = _disconnected_text()
+            stat_sub = Text("")
+            kill_txt = _disconnected_text()
+            kill_sub = Text("")
 
-        pnl = acct.get("daily_pnl", 0) or 0
-        pnl_pct = acct.get("daily_pnl_pct", 0) or 0
-        ps = "bold green" if pnl >= 0 else "bold red"
-        sign = "+" if pnl >= 0 else ""
-        g.add_row("P&L jour", Text(f"{sign}${pnl:,.2f} ({sign}{pnl_pct:.2f}%)", style=ps))
+        def _metric_panel(title: str, value: Text, sub: Text) -> Panel:
+            g = Table.grid(padding=0)
+            g.add_column(justify="center")
+            g.add_row(value)
+            g.add_row(sub)
+            return Panel(g, title=f"[bold]{title}[/]", border_style="dim",
+                         padding=(0, 1))
 
-        dd = abs(pnl_pct) if pnl < 0 else 0.0
-        dd_t = Text(f"{dd:.2f}%", style="bold red" if dd >= 3 else "white")
-        dd_t.append(" / 5.00%", style="dim")
-        g.add_row("Drawdown", dd_t)
+        mg_row = Table.grid(expand=True, padding=0)
+        mg_row.add_column(ratio=1)
+        mg_row.add_column(ratio=1)
+        mg_row.add_column(ratio=1)
+        mg_row.add_column(ratio=1)
+        mg_row.add_row(
+            _metric_panel("BALANCE", bal_txt, bal_sub),
+            _metric_panel("P&L DU JOUR", pnl_txt, pnl_sub),
+            _metric_panel("STATUT BOT", stat_txt, stat_sub),
+            _metric_panel("KILL SWITCH", kill_txt, kill_sub),
+        )
+        parts.append(mg_row)
 
-        wr = tr_summary.get("win_rate", 0)
-        g.add_row("WR jour", Text(f"{wr:.1f}% ({tr_summary.get('wins',0)}W/{tr_summary.get('losses',0)}L)", style="white"))
+        # ── 3. REGIME MARCHE ────────────────────────────────────
+        if api_ok:
+            bias = mkt.get("daily_bias", "NEUTRAL")
+            bias_style = {"BULLISH": "bold green", "BEARISH": "bold red"}.get(bias, "bold bright_yellow")
 
-        layout["account"].update(Panel(g, title="[bold]Compte[/]", border_style="blue"))
+            atr = mkt.get("atr_m1")
+            if atr is not None and atr > 10:
+                atr = atr / 100
+            atr_str = f"{atr:.2f}" if atr else "---"
 
-        # -- Market --
-        m = Table.grid(padding=(0, 3))
-        m.add_column(justify="right", style="dim", min_width=16)
-        m.add_column(justify="left", min_width=20)
+            ema_slope = mkt.get("ema20_slope", 0) or 0
+            slope_sign = "+" if ema_slope >= 0 else ""
+            slope_style = "bold green" if ema_slope >= 0 else "bold red"
 
-        bias = mkt.get("daily_bias", "N/A")
-        bias_s = {"BULLISH": "bold green", "BEARISH": "bold red", "NEUTRAL": "bold yellow"}.get(bias, "dim")
-        m.add_row("Daily Bias", Text(bias, style=bias_s))
+            session = mkt.get("session", "Hors session")
+            sess_style = "bold cyan"
+        else:
+            bias = "---"
+            bias_style = "bold red"
+            atr_str = "---"
+            ema_slope = 0
+            slope_sign = ""
+            slope_style = "dim"
+            session = "---"
+            sess_style = "dim"
 
-        atr = mkt.get("atr_m1")
-        m.add_row("ATR M1", Text(f"{atr:.4f}" if atr else "---", style="bold green" if atr and atr >= 0.4 else "dim"))
+        mkg = Table.grid(expand=True, padding=(0, 2))
+        mkg.add_column(justify="center", ratio=1)
+        mkg.add_column(justify="center", ratio=1)
+        mkg.add_column(justify="center", ratio=1)
+        mkg.add_column(justify="center", ratio=1)
+        mkg.add_row(
+            Text("DAILY BIAS", style="dim"),
+            Text("ATR M1", style="dim"),
+            Text("EMA20 SLOPE", style="dim"),
+            Text("SESSION", style="dim"),
+        )
+        mkg.add_row(
+            Text(bias, style=bias_style),
+            Text(atr_str, style="bold white"),
+            Text(f"{slope_sign}{ema_slope:.4f}" if api_ok else "---", style=slope_style),
+            Text(session, style=sess_style),
+        )
+        parts.append(Panel(mkg, title="[bold]REGIME MARCHE[/]", border_style="dim", padding=(0, 0)))
 
-        sess = mkt.get("session", "---")
-        ss = {"London": "bold cyan", "New York": "bold magenta"}.get(sess, "dim italic")
-        m.add_row("Session", Text(sess, style=ss))
-
-        bid = mkt.get("bid")
-        m.add_row("XAUUSD", Text(f"${bid:,.2f}" if bid else "---", style="bold yellow"))
-
-        layout["market"].update(Panel(m, title="[bold]Marche[/]", border_style="magenta"))
-
-        # -- Last trade --
+        # ── 4. DERNIER TRADE ────────────────────────────────────
         if trades:
             last = trades[-1]
-            lt = Table.grid(padding=(0, 3))
-            lt.add_column(justify="right", style="dim", min_width=14)
-            lt.add_column(justify="left", min_width=18)
-
             d = last.get("direction", "---")
-            lt.add_row("Direction", Text(d, style="bold green" if d == "LONG" else "bold red"))
-            lt.add_row("Entree", Text(f"${last['entry_price']:,.2f}" if last.get("entry_price") else "---"))
+            d_style = "bold green" if d == "LONG" else "bold red"
+            entry = f"${last['entry_price']:,.2f}" if last.get("entry_price") else "---"
             ep = last.get("exit_price")
-            lt.add_row("Sortie", Text(f"${ep:,.2f}" if ep else "EN COURS", style="white" if ep else "bold cyan"))
+            exit_str = f"${ep:,.2f}" if ep else "EN COURS"
+            exit_style = "bold white" if ep else "bold cyan"
             lp = last.get("pnl")
             if lp is not None:
-                lt.add_row("P&L", Text(f"{'+'if lp>=0 else ''}${lp:,.2f}", style="bold green" if lp >= 0 else "bold red"))
+                lp_sign = "+" if lp >= 0 else ""
+                lp_str = f"{lp_sign}${lp:,.2f}"
+                lp_style = "bold green" if lp >= 0 else "bold red"
             else:
-                lt.add_row("P&L", Text("---", style="dim"))
-            lt.add_row("Etat", Text(last.get("state", "---")))
-            layout["last_trade"].update(Panel(lt, title="[bold]Dernier Trade[/]", border_style="yellow"))
-        else:
-            layout["last_trade"].update(
-                Panel(Align.center(Text("Aucun trade aujourd'hui", style="dim italic")),
-                      title="[bold]Dernier Trade[/]", border_style="yellow")
-            )
+                lp_str = "---"
+                lp_style = "dim"
 
-        # -- Trades table --
-        table = Table(show_header=True, header_style="bold white", border_style="dim", expand=True)
-        table.add_column("Heure", style="cyan", width=8)
-        table.add_column("Dir", width=6)
-        table.add_column("Entree", justify="right", width=10)
-        table.add_column("Sortie", justify="right", width=10)
-        table.add_column("Etat", width=8)
-        table.add_column("P&L", justify="right", width=12)
+            lg = Table.grid(expand=True, padding=(0, 2))
+            lg.add_column(justify="center", ratio=1)
+            lg.add_column(justify="center", ratio=1)
+            lg.add_column(justify="center", ratio=1)
+            lg.add_column(justify="center", ratio=1)
+            lg.add_row(
+                Text("DIRECTION", style="dim"),
+                Text("ENTREE", style="dim"),
+                Text("SORTIE", style="dim"),
+                Text("P&L", style="dim"),
+            )
+            lg.add_row(
+                Text(d, style=d_style),
+                Text(entry, style="bold white"),
+                Text(exit_str, style=exit_style),
+                Text(lp_str, style=lp_style),
+            )
+            parts.append(Panel(lg, title="[bold]DERNIER TRADE[/]", border_style="dim", padding=(0, 0)))
+        elif api_ok:
+            parts.append(Panel(
+                Align.center(Text("Aucun trade aujourd'hui", style="dim italic")),
+                title="[bold]DERNIER TRADE[/]", border_style="dim", padding=(0, 0)))
+        else:
+            lg = Table.grid(expand=True)
+            lg.add_column(justify="center")
+            lg.add_row(_disconnected_text())
+            parts.append(Panel(lg, title="[bold]DERNIER TRADE[/]", border_style="dim", padding=(0, 0)))
+
+        # ── 5. TRADES DU JOUR (table) ──────────────────────────
+        tt = Table(show_header=True, header_style="bold white", border_style="dim",
+                   expand=True, padding=(0, 1))
+        tt.add_column("HEURE", style="cyan", width=8)
+        tt.add_column("DIR", width=7)
+        tt.add_column("ENTREE", justify="right", width=12)
+        tt.add_column("SORTIE", justify="right", width=12)
+        tt.add_column("RAISON", width=12)
+        tt.add_column("P&L", justify="right", width=12)
 
         if not trades:
-            table.add_row("--", "--", "--", "--", "--", "--")
+            tt.add_row("--", "--", "--", "--", "--", "--")
         else:
-            for i, t in enumerate(trades):
+            for t in trades:
                 h = t["opened_at"][11:16] if t.get("opened_at") else "--"
                 d = t.get("direction", "--")
                 ds = "green" if d == "LONG" else "red"
                 en = f"${t['entry_price']:,.2f}" if t.get("entry_price") else "--"
-                ex = f"${t['exit_price']:,.2f}" if t.get("exit_price") else "[cyan]OPEN[/]"
-                st = t.get("state", "--")
+                ep = t.get("exit_price")
+                if ep:
+                    ex = f"${ep:,.2f}"
+                else:
+                    ex = "[bold cyan]EN COURS[/]"
+                reason = t.get("reason", t.get("close_reason", "--"))
                 p = t.get("pnl")
                 if p is not None:
                     pst = "bold green" if p >= 0 else "bold red"
                     ps = f"[{pst}]{'+'if p>=0 else ''}${p:,.2f}[/]"
+                elif ep is None:
+                    ps = "[dim]---[/]"
                 else:
                     ps = "[dim]---[/]"
-                sty = "bold on grey23" if i == len(trades) - 1 and st in ("OPEN", "TP1_HIT", "TP2_HIT") else ""
-                table.add_row(h, f"[{ds}]{d}[/]", en, ex, st, ps, style=sty)
+                tt.add_row(h, f"[{ds}]{d}[/]", en, ex, str(reason), ps)
 
-        layout["trades"].update(Panel(table, title="[bold]Trades du Jour[/]", border_style="green"))
+        parts.append(Panel(tt, title="[bold]TRADES DU JOUR[/]", border_style="dim", padding=(0, 0)))
 
-    console = Console()
-    layout = build_layout()
+        # ── 6. FOOTER ──────────────────────────────────────────
+        if api_ok:
+            bid = mkt.get("bid")
+            bid_str = f"${bid:,.2f}" if bid else "---"
+            lot = acct.get("lot_size", 0.02)
+            spread = mkt.get("spread", 0)
+            commission = acct.get("commission", 0.28)
+            footer = Text()
+            footer.append(f"XAUUSD {bid_str}", style="bold yellow")
+            footer.append(f"  |  Lot {lot}  |  Spread {spread}  |  Commission ${commission}/trade", style="dim")
+        else:
+            footer = _disconnected_text()
+
+        parts.append(Align.center(footer))
+
+        # ── 7. PROMPT ──────────────────────────────────────────
+        prompt = Text()
+        prompt.append("inoxtrade@gold:~$ ", style="bold red")
+        prompt.append("_", style="bold red blink")
+        parts.append(prompt)
+
+        return Group(*parts)
+
+    console = Console(style=Style(bgcolor="#0d0d0d", color="white"))
 
     try:
-        with Live(layout, console=console, refresh_per_second=1, screen=True):
+        with Live(console=console, refresh_per_second=1, screen=True) as live:
             while True:
-                refresh(layout)
-                time.sleep(5)
+                status = _api_get_safe("/status")
+                trades_data = _api_get_safe("/trades")
+                dashboard = _build_dashboard(status, trades_data)
+                live.update(dashboard)
+                time.sleep(3)
     except KeyboardInterrupt:
         console.print("\n[bold yellow]Dashboard stopped.[/]")
+
+
+# ---------------------------------------------------------------------------
+# Interactive Menu
+# ---------------------------------------------------------------------------
+
+def cmd_menu():
+    """Interactive terminal menu with arrow-key navigation."""
+    import getpass
+    import os
+
+    import readchar
+    from rich.align import Align
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.style import Style
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console(style=Style(bgcolor="#0d0d0d", color="white"))
+
+    # ── helpers ────────────────────────────────────────────────
+
+    def _clear():
+        console.clear()
+
+    def _header():
+        t = Text()
+        t.append("INOXTRADE", style="bold bright_white")
+        t.append(" — MENU", style="dim")
+        console.print(Panel(Align.center(t), border_style="dim", padding=(0, 2)))
+
+    def _select(title: str, options: list[str], *, allow_quit: bool = True) -> int | None:
+        """Arrow-key menu. Returns index or None on quit/escape."""
+        idx = 0
+        while True:
+            _clear()
+            _header()
+            console.print()
+            if title:
+                console.print(f"  [bold]{title}[/]\n")
+            for i, opt in enumerate(options):
+                if i == idx:
+                    console.print(f"  [bold bright_white on grey23] > {opt} [/]")
+                else:
+                    console.print(f"    [dim]{opt}[/]")
+            if allow_quit:
+                console.print(f"\n  [dim]Fleches pour naviguer  |  Entree pour valider  |  q/Echap pour retour[/]")
+
+            key = readchar.readkey()
+            if key == readchar.key.UP:
+                idx = (idx - 1) % len(options)
+            elif key == readchar.key.DOWN:
+                idx = (idx + 1) % len(options)
+            elif key in (readchar.key.ENTER, "\r", "\n"):
+                return idx
+            elif key in ("q", "Q", readchar.key.ESC, "\x1b"):
+                return None
+            elif key.isdigit():
+                n = int(key)
+                if 1 <= n <= len(options):
+                    return n - 1
+
+    def _pause(msg: str = "Appuie sur une touche pour revenir..."):
+        console.print(f"\n  [dim]{msg}[/]")
+        readchar.readkey()
+
+    def _not_available():
+        console.print("  [bold yellow]Fonctionnalite disponible prochainement[/]")
+        _pause()
+
+    # ── [1] Strategie ──────────────────────────────────────────
+
+    def _menu_strategy():
+        status = _api_get_safe("/status")
+        if status is None:
+            _clear()
+            _header()
+            console.print("\n  [bold red]API DECONNECTEE[/]")
+            _pause()
+            return
+
+        bot = status.get("bot", {})
+        current = bot.get("strategy", "DTF")
+        bot_running = bot.get("running", False)
+
+        strategies = [
+            ("DTF", "Daily Trend Follower"),
+            ("ERM", "EMA Ribbon Momentum"),
+            ("VRS", "VWAP Reversion Scalper"),
+        ]
+
+        labels = []
+        for code, desc in strategies:
+            tag = " (actuelle)" if code == current else ""
+            labels.append(f"{code}  — {desc}{tag}")
+
+        _clear()
+        _header()
+        console.print(f"\n  Strategie active : [bold cyan]{current}[/]\n")
+
+        if bot_running:
+            console.print("  [bold yellow]Bot actif — arrete-le d'abord.[/]")
+            _pause()
+            return
+
+        choice = _select("Changer vers :", labels)
+        if choice is None:
+            return
+
+        new_code = strategies[choice][0]
+        if new_code == current:
+            _clear()
+            _header()
+            console.print(f"\n  [dim]{new_code} est deja la strategie active.[/]")
+            _pause()
+            return
+
+        result = _api_post_safe("/strategy", {"name": new_code})
+        _clear()
+        _header()
+        if result and result.get("success"):
+            console.print(f"\n  [bold green]Strategie changee → {new_code}. Redemarrage requis.[/]")
+        elif result:
+            console.print(f"\n  [bold red]Erreur : {result.get('message', 'inconnue')}[/]")
+        else:
+            _not_available()
+            return
+        _pause()
+
+    # ── [2] Backtest ───────────────────────────────────────────
+
+    def _menu_backtest():
+        strats = ["DTF", "ERM", "VRS"]
+        periods = [("7j", 7), ("30j", 30), ("90j", 90)]
+        lots = [0.01, 0.02, 0.05]
+
+        # Pick strategy
+        choice_s = _select("Strategie :", strats)
+        if choice_s is None:
+            return
+        strat = strats[choice_s]
+
+        # Pick period
+        choice_p = _select("Periode :", [p[0] for p in periods])
+        if choice_p is None:
+            return
+        days = periods[choice_p][1]
+
+        # Pick lot
+        choice_l = _select("Lot size :", [str(l) for l in lots])
+        if choice_l is None:
+            return
+        lot = lots[choice_l]
+
+        # Confirm
+        _clear()
+        _header()
+        console.print(f"\n  Strategie : [bold]{strat}[/]")
+        console.print(f"  Periode   : [bold]{days}j[/]")
+        console.print(f"  Lot       : [bold]{lot}[/]\n")
+
+        # Launch
+        result = _api_post_safe("/backtest", {"strategy": strat, "days": days, "lot": lot})
+
+        if result is None:
+            _not_available()
+            return
+
+        if result.get("async"):
+            # Poll for result
+            from rich.spinner import Spinner
+            from rich.live import Live
+
+            console.print("  [bold yellow]Backtest en cours... (peut prendre 2-5 min)[/]\n")
+            with Live(Spinner("dots", text="  Calcul en cours..."), console=console, refresh_per_second=4):
+                for _ in range(300):  # max 5 min
+                    time.sleep(1)
+                    poll = _api_get_safe("/backtest/status")
+                    if poll and poll.get("done"):
+                        result = _api_get_safe("/backtest/result")
+                        break
+                else:
+                    console.print("  [bold red]Timeout — backtest trop long.[/]")
+                    _pause()
+                    return
+
+        # Display result
+        _clear()
+        _header()
+
+        r = result if result else {}
+        tbl = Table(border_style="dim", padding=(0, 2), expand=False)
+        tbl.add_column("", style="dim", width=12)
+        tbl.add_column("", style="bold white", width=20)
+        tbl.add_row("Trades", str(r.get("total_trades", "--")))
+        wr = r.get("win_rate")
+        tbl.add_row("Win Rate", f"{wr:.1f}%" if wr is not None else "--")
+        pf = r.get("profit_factor")
+        tbl.add_row("PF", f"{pf:.2f}" if pf is not None else "--")
+        pnl = r.get("pnl")
+        if pnl is not None:
+            ps = "bold green" if pnl >= 0 else "bold red"
+            sign = "+" if pnl >= 0 else ""
+            tbl.add_row("P&L", f"[{ps}]{sign}${pnl:,.2f}[/]")
+        else:
+            tbl.add_row("P&L", "--")
+        dd = r.get("max_drawdown")
+        tbl.add_row("Max DD", f"${dd:,.2f}" if dd is not None else "--")
+
+        console.print(Panel(
+            tbl,
+            title=f"[bold]BACKTEST {strat} — {days}j[/]",
+            border_style="dim",
+            padding=(0, 1),
+        ))
+
+        # Export option
+        export_choice = _select("", ["Exporter ce rapport", "Retour"])
+        if export_choice == 0:
+            csv_path = Path.home() / "Desktop" / f"inoxtrade_backtest_{strat}_{days}j_{datetime.now().strftime('%Y%m%d')}.csv"
+            try:
+                import csv
+                with open(csv_path, "w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["Metric", "Value"])
+                    w.writerow(["Strategy", strat])
+                    w.writerow(["Period", f"{days}j"])
+                    w.writerow(["Lot", lot])
+                    w.writerow(["Trades", r.get("total_trades", "")])
+                    w.writerow(["Win Rate", f"{wr:.1f}%" if wr else ""])
+                    w.writerow(["Profit Factor", f"{pf:.2f}" if pf else ""])
+                    w.writerow(["P&L", f"{pnl:.2f}" if pnl else ""])
+                    w.writerow(["Max Drawdown", f"{dd:.2f}" if dd else ""])
+                _clear()
+                _header()
+                console.print(f"\n  [bold green]Exporte → {csv_path}[/]")
+            except Exception as e:
+                _clear()
+                _header()
+                console.print(f"\n  [bold red]Erreur export : {e}[/]")
+            _pause()
+
+    # ── [3] Compte MT5 ─────────────────────────────────────────
+
+    def _menu_mt5():
+        status = _api_get_safe("/status")
+
+        _clear()
+        _header()
+        console.print()
+
+        if status is None:
+            console.print("  [bold red]API DECONNECTEE[/]")
+            _pause()
+            return
+
+        acct = status.get("account", {})
+        login_raw = str(acct.get("login", ""))
+        login_masked = "*" * max(0, len(login_raw) - 2) + login_raw[-2:] if len(login_raw) > 2 else "********"
+
+        tbl = Table(border_style="dim", padding=(0, 2), expand=False)
+        tbl.add_column("", style="dim", width=14)
+        tbl.add_column("", style="bold white", width=24)
+        tbl.add_row("Login", login_masked)
+        tbl.add_row("Server", str(acct.get("server", "--")))
+        bal = acct.get("balance")
+        tbl.add_row("Balance", f"${bal:,.2f}" if bal else "--")
+        eq = acct.get("equity")
+        tbl.add_row("Equity", f"${eq:,.2f}" if eq else "--")
+
+        console.print(Panel(tbl, title="[bold]Compte actuel[/]", border_style="dim", padding=(0, 1)))
+
+        choice = _select("", ["Changer de compte", "Retour"])
+        if choice != 0:
+            return
+
+        # Credential input
+        _clear()
+        _header()
+        console.print("\n  [bold]Nouveaux credentials MT5[/]\n")
+        console.print("  [bold yellow]Ne jamais partager ces credentials.[/]\n")
+
+        try:
+            new_login = input("  Login : ").strip()
+            new_pass = getpass.getpass("  Password : ")
+        except (EOFError, KeyboardInterrupt):
+            return
+
+        servers = ["ICMarketsSC-Live", "ICMarketsSC-Demo", "Autre"]
+        srv_idx = _select("Server :", servers)
+        if srv_idx is None:
+            return
+        if srv_idx == 2:
+            _clear()
+            _header()
+            try:
+                new_server = input("\n  Nom du server : ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+        else:
+            new_server = servers[srv_idx]
+
+        if not new_login or not new_pass:
+            _clear()
+            _header()
+            console.print("\n  [bold red]Login et password requis.[/]")
+            _pause()
+            return
+
+        result = _api_post_safe("/mt5/credentials", {
+            "login": new_login,
+            "password": new_pass,
+            "server": new_server,
+        })
+
+        _clear()
+        _header()
+        if result and result.get("success"):
+            console.print("\n  [bold green]Credentials mis a jour. Redemarrage requis.[/]")
+        elif result:
+            console.print(f"\n  [bold red]Erreur : {result.get('message', 'inconnue')}[/]")
+        else:
+            _not_available()
+            return
+        _pause()
+
+    # ── [4] Positions ──────────────────────────────────────────
+
+    def _menu_positions():
+        positions = _api_get_safe("/positions")
+
+        _clear()
+        _header()
+        console.print()
+
+        if positions is None:
+            # Try /status fallback
+            status = _api_get_safe("/status")
+            if status is None:
+                console.print("  [bold red]API DECONNECTEE[/]")
+                _pause()
+                return
+            _not_available()
+            return
+
+        pos_list = positions.get("positions", [])
+        count = len(pos_list)
+        console.print(f"  Positions ouvertes : [bold]{count}[/]\n")
+
+        if pos_list:
+            tbl = Table(border_style="dim", expand=True, padding=(0, 1))
+            tbl.add_column("Ticket", style="cyan", width=10)
+            tbl.add_column("Dir", width=7)
+            tbl.add_column("Entree", justify="right", width=10)
+            tbl.add_column("Prix act", justify="right", width=10)
+            tbl.add_column("P&L", justify="right", width=12)
+
+            for p in pos_list:
+                d = p.get("direction", "--")
+                ds = "bold green" if d == "LONG" else "bold red"
+                entry = f"${p['entry_price']:,.2f}" if p.get("entry_price") else "--"
+                curr = f"${p['current_price']:,.2f}" if p.get("current_price") else "--"
+                pnl = p.get("pnl")
+                if pnl is not None:
+                    ps = "bold green" if pnl >= 0 else "bold red"
+                    sign = "+" if pnl >= 0 else ""
+                    pnl_s = f"[{ps}]{sign}${pnl:,.2f}[/]"
+                else:
+                    pnl_s = "[dim]---[/]"
+                tbl.add_row(str(p.get("ticket", "--")), f"[{ds}]{d}[/]", entry, curr, pnl_s)
+
+            console.print(tbl)
+            console.print()
+
+            actions = ["Fermer toutes les positions", "Fermer une position", "Retour"]
+        else:
+            console.print("  [dim]Aucune position ouverte.[/]")
+            _pause()
+            return
+
+        choice = _select("", actions)
+        if choice is None or choice == 2:
+            return
+
+        if choice == 0:
+            # Close all
+            _clear()
+            _header()
+            try:
+                confirm = input(f"\n  Fermer {count} position(s) ? (y/n) : ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if confirm != "y":
+                return
+            result = _api_post_safe("/positions/close_all")
+            _clear()
+            _header()
+            if result and result.get("success"):
+                closed = result.get("closed", count)
+                console.print(f"\n  [bold green]{closed} position(s) fermee(s).[/]")
+            elif result:
+                console.print(f"\n  [bold red]Erreur : {result.get('message', 'inconnue')}[/]")
+            else:
+                _not_available()
+                return
+            _pause()
+
+        elif choice == 1:
+            # Close one
+            _clear()
+            _header()
+            try:
+                ticket = input("\n  Numero du ticket : ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if not ticket:
+                return
+            result = _api_post_safe("/positions/close", {"ticket": int(ticket)})
+            _clear()
+            _header()
+            if result and result.get("success"):
+                console.print(f"\n  [bold green]Position {ticket} fermee.[/]")
+            elif result:
+                console.print(f"\n  [bold red]Erreur : {result.get('message', 'inconnue')}[/]")
+            else:
+                _not_available()
+                return
+            _pause()
+
+    # ── [5] Exporter CSV ───────────────────────────────────────
+
+    def _menu_export():
+        periods = [
+            ("Aujourd'hui", 1),
+            ("7 derniers jours", 7),
+            ("30 derniers jours", 30),
+            ("Tout l'historique", 0),
+        ]
+
+        choice = _select("Exporter les trades :", [p[0] for p in periods])
+        if choice is None:
+            return
+
+        days = periods[choice][1]
+        params = {"format": "csv"}
+        if days > 0:
+            params["days"] = days
+
+        _clear()
+        _header()
+        console.print("\n  [dim]Telechargement...[/]")
+
+        data = _api_get_safe("/trades", params=params)
+
+        if data is None:
+            console.print("  [bold red]API DECONNECTEE[/]")
+            _pause()
+            return
+
+        today = datetime.now().strftime("%Y%m%d")
+        csv_path = Path.home() / "Desktop" / f"inoxtrade_trades_{today}.csv"
+
+        try:
+            if isinstance(data, str):
+                csv_path.write_text(data)
+            elif isinstance(data, dict):
+                # API returned JSON — convert to CSV
+                import csv as csv_mod
+                trades = data.get("trades", [])
+                if not trades:
+                    console.print("  [dim]Aucun trade a exporter.[/]")
+                    _pause()
+                    return
+                with open(csv_path, "w", newline="") as f:
+                    w = csv_mod.DictWriter(f, fieldnames=trades[0].keys())
+                    w.writeheader()
+                    w.writerows(trades)
+            _clear()
+            _header()
+            console.print(f"\n  [bold green]Exporte → {csv_path}[/]")
+        except Exception as e:
+            _clear()
+            _header()
+            console.print(f"\n  [bold red]Erreur : {e}[/]")
+        _pause()
+
+    # ── Main loop ──────────────────────────────────────────────
+
+    MENU_ITEMS = [
+        "Strategie",
+        "Backtest",
+        "Compte MT5",
+        "Positions",
+        "Exporter CSV",
+        "Quitter",
+    ]
+
+    HANDLERS = [
+        _menu_strategy,
+        _menu_backtest,
+        _menu_mt5,
+        _menu_positions,
+        _menu_export,
+    ]
+
+    while True:
+        choice = _select("", [f"[{i+1}] {m}" if i < 5 else f"[q] {m}" for i, m in enumerate(MENU_ITEMS)])
+        if choice is None or choice == 5:
+            _clear()
+            console.print("[dim]Au revoir.[/]")
+            break
+        HANDLERS[choice]()
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +1175,7 @@ def cmd_connect():
 COMMANDS = {
     "setup": cmd_setup,
     "connect": cmd_connect,
+    "menu": cmd_menu,
     "status": cmd_status,
     "start": cmd_start,
     "stop": cmd_stop,
@@ -551,6 +1194,7 @@ def main():
         c.print("Commands:")
         c.print("  [bold]setup[/]     Configure VPS connection")
         c.print("  [bold]connect[/]   Live dashboard")
+        c.print("  [bold]menu[/]      Interactive menu")
         c.print("  [bold]status[/]    One-line status")
         c.print("  [bold]start[/]     Start bot on VPS")
         c.print("  [bold]stop[/]      Stop bot on VPS")
