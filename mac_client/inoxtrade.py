@@ -371,6 +371,34 @@ def cmd_logs():
         c.print("\n[dim]Logs stopped.[/]")
 
 
+def _make_ascii_art():
+    """Build the INOXTRADE ASCII banner with only X in red, rest bright white."""
+    from rich.text import Text
+
+    raw_lines = [
+        " ___ _   _  _____  _______ ____      _    ____  _____",
+        "|_ _| \\ | |/ _ \\ \\/ /_   _|  _ \\    / \\  |  _ \\| ____|",
+        " | ||  \\| | | | \\  /  | | | |_) |  / _ \\ | | | |  _|",
+        " | || |\\  | |_| /  \\  | | |  _ <  / ___ \\| |_| | |___",
+        "|___|_| \\_|\\___/_/\\_\\ |_| |_| \\_\\/_/   \\_\\____/|_____|",
+    ]
+    t = Text()
+    for i, line in enumerate(raw_lines):
+        for j, ch in enumerate(line):
+            is_x = False
+            if i == 1 and 13 <= j <= 15:
+                is_x = True
+            elif i == 2 and 13 <= j <= 17:
+                is_x = True
+            elif i == 3 and 13 <= j <= 17:
+                is_x = True
+            elif i == 4 and 13 <= j <= 17:
+                is_x = True
+            t.append(ch, style="bold red" if is_x else "bold bright_white")
+        t.append("\n")
+    return t
+
+
 def cmd_connect():
     """Live terminal dashboard — exact visual spec."""
     from rich.align import Align
@@ -380,31 +408,6 @@ def cmd_connect():
     from rich.style import Style
     from rich.table import Table
     from rich.text import Text
-
-    def _make_ascii_art() -> Text:
-        """Build the INOXTRADE ASCII banner with only X in red, rest bright white."""
-        raw_lines = [
-            " ___ _   _  _____  _______ ____      _    ____  _____",
-            "|_ _| \\ | |/ _ \\ \\/ /_   _|  _ \\    / \\  |  _ \\| ____|",
-            " | ||  \\| | | | \\  /  | | | |_) |  / _ \\ | | | |  _|",
-            " | || |\\  | |_| /  \\  | | |  _ <  / ___ \\| |_| | |___",
-            "|___|_| \\_|\\___/_/\\_\\ |_| |_| \\_\\/_/   \\_\\____/|_____|",
-        ]
-        t = Text()
-        for i, line in enumerate(raw_lines):
-            for j, ch in enumerate(line):
-                is_x = False
-                if i == 1 and 13 <= j <= 15:
-                    is_x = True
-                elif i == 2 and 13 <= j <= 17:
-                    is_x = True
-                elif i == 3 and 13 <= j <= 17:
-                    is_x = True
-                elif i == 4 and 13 <= j <= 17:
-                    is_x = True
-                t.append(ch, style="bold red" if is_x else "bold bright_white")
-            t.append("\n")
-        return t
 
     def _disconnected_text() -> Text:
         return Text("API DECONNECTEE", style="bold red")
@@ -681,10 +684,18 @@ def cmd_menu():
         console.clear()
 
     def _header():
-        t = Text()
-        t.append("INOXTRADE", style="bold bright_white")
-        t.append(" — MENU", style="dim")
-        console.print(Panel(Align.center(t), border_style="dim", padding=(0, 2)))
+        now_utc = datetime.utcnow().strftime("%H:%M:%S UTC")
+        art = _make_ascii_art()
+        subtitle = Text()
+        subtitle.append("Gold Algorithmic Trading System — XAUUSD", style="dim")
+        subtitle.append(" . IC Markets ECN . MT5", style="dim")
+        subtitle.append("    ", style="dim")
+        subtitle.append(now_utc, style="bold white")
+        hdr = Text()
+        hdr.append_text(art)
+        hdr.append_text(subtitle)
+        console.print(Align.center(hdr))
+        console.print(Text("-" * 80, style="dim"))
 
     def _select(title: str, options: list[str], *, allow_quit: bool = True) -> int | None:
         """Arrow-key menu. Returns index or None on quit/escape."""
